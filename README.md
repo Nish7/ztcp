@@ -1,11 +1,11 @@
 # zTCP
 
-- Learning Playground for Socket/Network Programming with Zig
-- Build Scratch TCP Server with:
-    - Multithreaded Support with `ThreadPool`
-    - Non-Blocking/Evented IO
-    - `epoll` Support 
-    - `kqueue` Support
+Build TCP Server from Scratch with:
+- Multithreaded Support with `ThreadPool`
+- Non-Blocking/Evented IO
+- `epoll` Support 
+- `kqueue` Support
 
-- Most been following: [Karl Seguin's Blog](https://www.openmymind.net/)
-
+Notes:
+- Repo serves as learning playground for Socket/Network Programming with Zig
+- Following: [Karl Seguin's Blog](https://www.openmymind.net/)
