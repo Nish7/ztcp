@@ -5,12 +5,20 @@ pub const Reader = struct {
     buf: []u8,
     pos: usize = 0,
     start: usize = 0,
-    socket: posix.socket_t,
 
-    pub fn readMessage(self: *Reader) ![]u8 {
-        while (true) {
+    pub fn init(allocator: std.mem.Allocator, size: usize) !Reader {
+        return .{ .buf = try allocator.alloc(u8, size), .start = 0, .pos = 0 };
+    }
+
+    pub fn deinit(self: *Reader, allocator: std.mem.Allocator) void {
+        allocator.free(self.buf);
+    }
+
+    // readMessage -> bufferredReader() -> ensureSpace()
+    pub fn readMessage(self: *Reader, socket: posix.socket_t) ![]u8 {
+        while (true) { // process every buffered messages 
             if (try self.bufferedReader()) |msg| return msg;
-            const n = try posix.read(self.socket, self.buf[self.pos..]);
+            const n = try posix.read(socket, self.buf[self.pos..]);
             if (n == 0) return error.Closed;
             self.pos += n;
             std.debug.print("Recieved: {X}\n", .{self.buf[self.start..self.pos]});
