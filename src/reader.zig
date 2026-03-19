@@ -16,7 +16,7 @@ pub const Reader = struct {
 
     // readMessage -> bufferredReader() -> ensureSpace()
     pub fn readMessage(self: *Reader, socket: posix.socket_t) ![]u8 {
-        while (true) { // process every buffered messages 
+        while (true) { // process every buffered messages
             if (try self.bufferedReader()) |msg| return msg;
             const n = try posix.read(socket, self.buf[self.pos..]);
             if (n == 0) return error.Closed;
