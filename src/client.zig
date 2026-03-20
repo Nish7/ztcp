@@ -3,6 +3,7 @@ const Reader = @import("reader.zig").Reader;
 const net = std.net;
 const posix = std.posix;
 const ClientList = @import("server.zig").ClientList;
+const Epoll = @import("epoll.zig").Epoll;
 
 pub const Client = struct {
     reader: Reader,
@@ -10,6 +11,7 @@ pub const Client = struct {
     address: net.Address,
     read_timeout_node: *ClientNode,
     read_timeout: i64,
+    epoll: *Epoll,
 
     allocator: std.mem.Allocator,
     write_buf: []u8,
@@ -20,7 +22,7 @@ pub const Client = struct {
         node: ClientList.Node = .{},
     };
 
-    pub fn init(allocator: std.mem.Allocator, socket: posix.socket_t, address: std.net.Address) !Client {
+    pub fn init(allocator: std.mem.Allocator, socket: posix.socket_t, address: std.net.Address, poll: *Epoll) !Client {
         var reader = try Reader.init(allocator, 4096);
         errdefer reader.deinit(allocator);
 
@@ -30,6 +32,7 @@ pub const Client = struct {
             .allocator = allocator,
             .reader = reader,
             .socket = socket,
+            .epoll = poll,
             .address = address,
             .write_buf = write_buffer,
             .to_write = &.{},
@@ -44,7 +47,7 @@ pub const Client = struct {
     }
 
     // write message from the msg to write_buf
-    pub fn writeMessage(self: *Client, msg: []const u8) !bool {
+    pub fn writeMessage(self: *Client, msg: []const u8) !void {
         if (self.to_write.len > 0) {
             return error.PendingMessage;
         }
@@ -61,21 +64,21 @@ pub const Client = struct {
 
     pub fn write(
         self: *Client,
-    ) !bool {
+    ) !void {
         // write the message from to_write to client socket
         var buf = self.to_write;
         defer self.to_write = buf;
 
         while (buf.len > 0) {
             const n = posix.write(self.socket, buf) catch |err| switch (err) {
-                error.WouldBlock => return false,
+                error.WouldBlock => return self.epoll.writeMode(self),
                 else => return err,
             };
 
             if (n == 0) return error.Closed;
             buf = buf[n..];
         } else {
-            return true;
+            return self.epoll.readMode(self);
         }
     }
 

@@ -36,6 +36,7 @@ pub const Reader = struct {
         }
 
         const messagelen = std.mem.readInt(u32, unprocessed[0..4], .little);
+        if (messagelen > self.buf.len - 4) return error.BufferTooSmall;
         const totallen = messagelen + 4;
         std.debug.print("total len: {d}\n", .{totallen});
 

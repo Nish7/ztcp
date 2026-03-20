@@ -1,7 +1,9 @@
 const std = @import("std");
 const Client = @import("client.zig").Client;
+const Epoll = @import("epoll.zig").Epoll;
 const ClientNode = Client.ClientNode;
 const net = std.net;
+const linux = std.os.linux;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
@@ -13,26 +15,19 @@ pub const ClientList = std.DoublyLinkedList;
 pub const Server = struct {
     allocator: Allocator,
     connected: usize,
-    polls: []posix.pollfd,
-    clients: []*Client,
-    client_polls: []posix.pollfd,
+    max: usize,
     client_pool: std.heap.MemoryPool(Client),
     read_timeout_list: ClientList,
     client_node_pool: std.heap.MemoryPool(ClientNode),
+    poll: Epoll,
 
     pub fn init(allocator: Allocator, max: usize) !Server {
-        const polls = try allocator.alloc(posix.pollfd, max + 1);
-        errdefer allocator.free(polls);
-
-        const clients = try allocator.alloc(*Client, max);
-        errdefer allocator.free(clients);
-
-        return .{ .polls = polls, .connected = 0, .client_polls = polls[1..], .clients = clients, .allocator = allocator, .client_pool = std.heap.MemoryPool(Client).init(allocator), .client_node_pool = std.heap.MemoryPool(ClientNode).init(allocator), .read_timeout_list = .{} };
+        const poll = try Epoll.init();
+        return .{ .poll = poll, .max = max, .connected = 0, .allocator = allocator, .client_pool = std.heap.MemoryPool(Client).init(allocator), .client_node_pool = std.heap.MemoryPool(ClientNode).init(allocator), .read_timeout_list = .{} };
     }
 
     pub fn deinit(self: *Server) void {
-        self.allocator.free(self.polls);
-        self.allocator.free(self.clients);
+        self.poll.deinit();
         self.client_pool.deinit();
         self.client_node_pool.deinit();
     }
@@ -48,67 +43,54 @@ pub const Server = struct {
         try posix.bind(listener, &address.any, address.getOsSockLen());
         try posix.listen(listener, 128);
 
-        self.polls[0] = posix.pollfd{ .fd = listener, .revents = 0, .events = posix.POLL.IN };
+        try self.poll.addListener(listener);
 
         while (true) {
             const next_timeout = self.enforceTimeout();
-            _ = try posix.poll(self.polls[0 .. self.connected + 1], next_timeout);
+            const ready_events = self.poll.wait(next_timeout);
 
-            if (self.polls[0].revents != 0) {
-                self.accept(listener) catch |err| log.err("failed to accept: {}", .{err});
-            }
+            for (ready_events) |ready| {
+                switch (ready.data.ptr) {
+                    0 => self.accept(listener) catch |err| log.err("failed to accept: {}", .{err}),
+                    else => |nptr| {
+                        const events = ready.events;
+                        const client: *Client = @ptrFromInt(nptr);
 
-            var i: usize = 0;
-            while (i < self.connected) {
-                const revents = self.client_polls[i].revents;
-                if (revents == 0) {
-                    i += 1;
-                    continue;
-                }
+                        if (events & linux.EPOLL.IN == linux.EPOLL.IN) {
+                            while (true) {
+                                const msg = client.readMessage() catch {
+                                    self.removeClient(client);
+                                    break;
+                                } orelse break;
 
-                var client = self.clients[i];
-                if (revents & posix.POLL.IN == posix.POLL.IN) {
-                    while (true) {
-                        const msg = client.readMessage() catch {
-                            self.removeClient(i);
-                            break;
-                        } orelse {
-                            i += 1;
-                            break;
-                        };
+                                client.read_timeout = std.time.milliTimestamp() + READ_TIMEOUT;
+                                self.read_timeout_list.remove(&client.read_timeout_node.node);
+                                self.read_timeout_list.append(&client.read_timeout_node.node);
 
-                        client.read_timeout = std.time.milliTimestamp() + READ_TIMEOUT;
-                        self.read_timeout_list.remove(&client.read_timeout_node.node);
-                        self.read_timeout_list.append(&client.read_timeout_node.node);
-
-                        const written = client.writeMessage(msg) catch {
-                            self.removeClient(i);
-                            break;
-                        };
-
-                        if (written == false) {
-                            self.client_polls[i].events = posix.POLL.OUT;
-                            break;
+                                client.writeMessage(msg) catch {
+                                    self.removeClient(client);
+                                    break;
+                                };
+                                
+                                if (client.to_write.len > 0) break;
+                                std.debug.print("got: {s}\n", .{msg});
+                            }
+                        } else if (events & linux.EPOLL.OUT == linux.EPOLL.OUT) {
+                            client.write() catch self.removeClient(client);
                         }
-
-                        std.debug.print("got: {s}\n", .{msg});
-                    }
-                } else if (revents & posix.POLL.OUT == posix.POLL.OUT) {
-                    const written = client.write() catch {
-                        self.removeClient(i);
-                        continue;
-                    };
-
-                    if (written) {
-                        self.client_polls[i].events = posix.POLL.IN;
-                    }
+                    },
                 }
             }
         }
     }
 
     fn accept(self: *Server, listener: posix.socket_t) !void {
-        const available = self.client_polls.len - self.connected;
+        const available = self.max - self.connected;
+        if (available <= 0) {
+            std.debug.print("No space for available for client. Paused Accepting", .{});
+            return;
+        }
+
         for (0..available) |_| {
             var address: net.Address = undefined;
             var address_len: posix.socklen_t = @sizeOf(net.Address);
@@ -120,9 +102,10 @@ pub const Server = struct {
             const client: *Client = try self.client_pool.create();
             errdefer self.client_pool.destroy(client);
 
-            client.* = Client.init(self.allocator, socket, address) catch |err| {
-                posix.close(socket);
+            client.* = Client.init(self.allocator, socket, address, &self.poll) catch |err| {
                 log.err("failed to initialize client: {}", .{err});
+                posix.close(socket);
+                self.client_pool.destroy(client);
                 return;
             };
 
@@ -132,16 +115,10 @@ pub const Server = struct {
 
             client.read_timeout_node.data = client;
             self.read_timeout_list.append(&client.read_timeout_node.node);
+            errdefer self.read_timeout_list.remove(&client.read_timeout_node.node);
 
-            self.clients[self.connected] = client;
-            self.client_polls[self.connected] = .{
-                .fd = socket,
-                .revents = 0,
-                .events = posix.POLL.IN,
-            };
+            try self.poll.newClient(client);
             self.connected += 1;
-        } else {
-            self.polls[0].events = 0;
         }
     }
 
@@ -163,20 +140,12 @@ pub const Server = struct {
         }
     }
 
-    fn removeClient(self: *Server, at: usize) void {
-        var client = self.clients[at];
-        defer {
-            posix.close(client.socket);
-            self.client_node_pool.destroy(client.read_timeout_node);
-            client.deinit(self.allocator);
-            self.client_pool.destroy(client);
-        }
-
-        const last_index = self.connected - 1;
-        self.clients[at] = self.clients[last_index];
-        self.client_polls[at] = self.client_polls[last_index];
-        self.connected = last_index;
-        self.polls[0].events = posix.POLL.IN;
+    fn removeClient(self: *Server, client: *Client) void {
         self.read_timeout_list.remove(&client.read_timeout_node.node);
+        posix.close(client.socket);
+        self.client_node_pool.destroy(client.read_timeout_node);
+        client.deinit(self.allocator);
+        self.client_pool.destroy(client);
+        self.connected -= 1;
     }
 };
