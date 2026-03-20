@@ -1,10 +1,12 @@
 const std = @import("std");
 const Client = @import("client.zig").Client;
 const Epoll = @import("epoll.zig").Epoll;
+const Kqueue = @import("kqueue.zig").Kqueue;
 const ClientNode = Client.ClientNode;
 const net = std.net;
 const linux = std.os.linux;
 const posix = std.posix;
+const system = std.posix.system;
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.tcp_demo);
@@ -19,10 +21,10 @@ pub const Server = struct {
     client_pool: std.heap.MemoryPool(Client),
     read_timeout_list: ClientList,
     client_node_pool: std.heap.MemoryPool(ClientNode),
-    poll: Epoll,
+    poll: Kqueue,
 
     pub fn init(allocator: Allocator, max: usize) !Server {
-        const poll = try Epoll.init();
+        const poll = try Kqueue.init();
         return .{ .poll = poll, .max = max, .connected = 0, .allocator = allocator, .client_pool = std.heap.MemoryPool(Client).init(allocator), .client_node_pool = std.heap.MemoryPool(ClientNode).init(allocator), .read_timeout_list = .{} };
     }
 
@@ -47,35 +49,36 @@ pub const Server = struct {
 
         while (true) {
             const next_timeout = self.enforceTimeout();
-            const ready_events = self.poll.wait(next_timeout);
+            const ready_events = try self.poll.wait(next_timeout);
 
             for (ready_events) |ready| {
-                switch (ready.data.ptr) {
+                switch (ready.udata) {
                     0 => self.accept(listener) catch |err| log.err("failed to accept: {}", .{err}),
                     else => |nptr| {
-                        const events = ready.events;
+                        const events = ready.filter;
                         const client: *Client = @ptrFromInt(nptr);
 
-                        if (events & linux.EPOLL.IN == linux.EPOLL.IN) {
+                        if (events == system.EVFILT.READ) {
                             while (true) {
                                 const msg = client.readMessage() catch {
                                     self.removeClient(client);
                                     break;
                                 } orelse break;
 
+                                std.debug.print("got: {s}\n", .{msg});
+
                                 client.read_timeout = std.time.milliTimestamp() + READ_TIMEOUT;
-                                self.read_timeout_list.remove(&client.read_timeout_node.node);
-                                self.read_timeout_list.append(&client.read_timeout_node.node);
+                                self.read_timeout_list.remove(&(client.read_timeout_node.node));
+                                self.read_timeout_list.append(&(client.read_timeout_node.node));
 
                                 client.writeMessage(msg) catch {
                                     self.removeClient(client);
                                     break;
                                 };
-                                
+
                                 if (client.to_write.len > 0) break;
-                                std.debug.print("got: {s}\n", .{msg});
                             }
-                        } else if (events & linux.EPOLL.OUT == linux.EPOLL.OUT) {
+                        } else if (events == system.EVFILT.WRITE) {
                             client.write() catch self.removeClient(client);
                         }
                     },
@@ -114,8 +117,8 @@ pub const Server = struct {
             errdefer self.client_node_pool.destroy(client.read_timeout_node);
 
             client.read_timeout_node.data = client;
-            self.read_timeout_list.append(&client.read_timeout_node.node);
-            errdefer self.read_timeout_list.remove(&client.read_timeout_node.node);
+            self.read_timeout_list.append(&(client.read_timeout_node.node));
+            errdefer self.read_timeout_list.remove(&(client.read_timeout_node.node));
 
             try self.poll.newClient(client);
             self.connected += 1;
@@ -130,10 +133,7 @@ pub const Server = struct {
             const l: *ClientNode = @fieldParentPtr("node", n);
             const client = l.data;
             const diff = client.read_timeout - now;
-            if (diff > 0) {
-                return @intCast(diff);
-            }
-
+            if (diff > 0) return @intCast(diff);
             posix.shutdown(client.socket, .recv) catch {};
         } else {
             return -1;
@@ -141,7 +141,7 @@ pub const Server = struct {
     }
 
     fn removeClient(self: *Server, client: *Client) void {
-        self.read_timeout_list.remove(&client.read_timeout_node.node);
+        self.read_timeout_list.remove(&(client.read_timeout_node.node));
         posix.close(client.socket);
         self.client_node_pool.destroy(client.read_timeout_node);
         client.deinit(self.allocator);
