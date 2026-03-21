@@ -21,17 +21,31 @@ pub const Server = struct {
     client_pool: std.heap.MemoryPool(Client),
     read_timeout_list: ClientList,
     client_node_pool: std.heap.MemoryPool(ClientNode),
+    pending_free_list: []*Client,
+    pending_count: usize = 0,
     poll: Kqueue,
 
     pub fn init(allocator: Allocator, max: usize) !Server {
         const poll = try Kqueue.init();
-        return .{ .poll = poll, .max = max, .connected = 0, .allocator = allocator, .client_pool = std.heap.MemoryPool(Client).init(allocator), .client_node_pool = std.heap.MemoryPool(ClientNode).init(allocator), .read_timeout_list = .{} };
+        const client_free_list = try allocator.alloc(*Client, max);
+
+        return .{
+            .poll = poll,
+            .max = max,
+            .connected = 0,
+            .allocator = allocator,
+            .client_pool = std.heap.MemoryPool(Client).init(allocator),
+            .client_node_pool = std.heap.MemoryPool(ClientNode).init(allocator),
+            .read_timeout_list = .{},
+            .pending_free_list = client_free_list,
+        };
     }
 
     pub fn deinit(self: *Server) void {
         self.poll.deinit();
         self.client_pool.deinit();
         self.client_node_pool.deinit();
+        self.allocator.free(self.pending_free_list);
     }
 
     pub fn run(self: *Server, address: std.net.Address) !void {
@@ -55,12 +69,26 @@ pub const Server = struct {
                 switch (ready.udata) {
                     0 => self.accept(listener) catch |err| log.err("failed to accept: {}", .{err}),
                     else => |nptr| {
+                        std.debug.print("Client Event [{x}]\n", .{nptr});
+                        std.debug.print(
+                            "event filter={} flags=0x{x} udata=0x{x}\n",
+                            .{ ready.filter, ready.flags, ready.udata },
+                        );
+
                         const events = ready.filter;
                         const client: *Client = @ptrFromInt(nptr);
 
-                        if (events == system.EVFILT.READ) {
+                        if (client.closed) continue;
+
+                        if ((ready.flags & posix.system.EV.ERROR) != 0) {
+                            std.debug.print("kqueue error event: filter={} data={} udata=0x{x}\n", .{
+                                ready.filter, ready.data, ready.udata,
+                            });
+                            continue;
+                        } else if (events == system.EVFILT.READ) {
                             while (true) {
-                                const msg = client.readMessage() catch {
+                                const msg = client.readMessage() catch |err| {
+                                    std.debug.print("read error: {any}", .{err});
                                     self.removeClient(client);
                                     break;
                                 } orelse break;
@@ -71,7 +99,8 @@ pub const Server = struct {
                                 self.read_timeout_list.remove(&(client.read_timeout_node.node));
                                 self.read_timeout_list.append(&(client.read_timeout_node.node));
 
-                                client.writeMessage(msg) catch {
+                                client.writeMessage(msg) catch |err| {
+                                    std.debug.print("write error: {any}", .{err});
                                     self.removeClient(client);
                                     break;
                                 };
@@ -84,7 +113,19 @@ pub const Server = struct {
                     },
                 }
             }
+
+            if (self.pending_count > 0) self.drainPendingClient();
         }
+    }
+
+    fn drainPendingClient(self: *Server) void {
+        for (self.pending_free_list[0..self.pending_count]) |c| {
+            c.deinit(self.allocator);
+            self.client_node_pool.destroy(c.read_timeout_node);
+            self.client_pool.destroy(c);
+        }
+
+        self.pending_count = 0;
     }
 
     fn accept(self: *Server, listener: posix.socket_t) !void {
@@ -97,7 +138,12 @@ pub const Server = struct {
         for (0..available) |_| {
             var address: net.Address = undefined;
             var address_len: posix.socklen_t = @sizeOf(net.Address);
-            const socket = posix.accept(listener, &address.any, &address_len, posix.SOCK.NONBLOCK) catch |err| switch (err) {
+            const socket = posix.accept(
+                listener,
+                &address.any,
+                &address_len,
+                posix.SOCK.NONBLOCK,
+            ) catch |err| switch (err) {
                 error.WouldBlock => return,
                 else => return err,
             };
@@ -105,7 +151,12 @@ pub const Server = struct {
             const client: *Client = try self.client_pool.create();
             errdefer self.client_pool.destroy(client);
 
-            client.* = Client.init(self.allocator, socket, address, &self.poll) catch |err| {
+            client.* = Client.init(
+                self.allocator,
+                socket,
+                address,
+                &self.poll,
+            ) catch |err| {
                 log.err("failed to initialize client: {}", .{err});
                 posix.close(socket);
                 self.client_pool.destroy(client);
@@ -141,11 +192,18 @@ pub const Server = struct {
     }
 
     fn removeClient(self: *Server, client: *Client) void {
-        self.read_timeout_list.remove(&(client.read_timeout_node.node));
+        if (client.closed) return;
+
         posix.close(client.socket);
-        self.client_node_pool.destroy(client.read_timeout_node);
-        client.deinit(self.allocator);
-        self.client_pool.destroy(client);
+        client.closed = true;
+
+        self.pending_free_list[self.pending_count] = client;
+        self.pending_count += 1;
+
+        self.read_timeout_list.remove(&(client.read_timeout_node.node));
+
         self.connected -= 1;
+
+        std.debug.print("[{f}] Client Removed!\n", .{client.address});
     }
 };

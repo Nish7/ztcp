@@ -30,7 +30,7 @@ pub const Kqueue = struct {
         return self.event_list[0..count];
     }
 
-   pub fn addListener(self: *Kqueue, listener: posix.socket_t) !void {
+    pub fn addListener(self: *Kqueue, listener: posix.socket_t) !void {
         // ok to use EV.ADD to renable the listener if it was previous
         // disabled via removeListener
         try self.queueChange(.{
@@ -58,7 +58,7 @@ pub const Kqueue = struct {
         try self.queueChange(.{
             .ident = @intCast(client.socket),
             .filter = posix.system.EVFILT.READ,
-            .flags = posix.system.EV.ADD,
+            .flags = posix.system.EV.ADD | posix.system.EV.CLEAR,
             .fflags = 0,
             .data = 0,
             .udata = @intFromPtr(client),
@@ -67,7 +67,7 @@ pub const Kqueue = struct {
         try self.queueChange(.{
             .ident = @intCast(client.socket),
             .filter = posix.system.EVFILT.WRITE,
-            .flags = posix.system.EV.ADD | posix.system.EV.DISABLE,
+            .flags = posix.system.EV.ADD | posix.system.EV.DISABLE | posix.system.EV.CLEAR,
             .fflags = 0,
             .data = 0,
             .udata = @intFromPtr(client),
@@ -92,7 +92,6 @@ pub const Kqueue = struct {
             .data = 0,
             .udata = @intFromPtr(client),
         });
-
     }
 
     pub fn writeMode(self: *Kqueue, client: *Client) !void {

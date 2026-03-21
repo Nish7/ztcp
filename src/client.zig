@@ -13,6 +13,7 @@ pub const Client = struct {
     read_timeout_node: *ClientNode,
     read_timeout: i64,
     poll: *Kqueue,
+    closed: bool = false,
 
     allocator: std.mem.Allocator,
     write_buf: []u8,
