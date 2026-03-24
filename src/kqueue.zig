@@ -1,7 +1,6 @@
 const std = @import("std");
 const Client = @import("client.zig").Client;
 const Event = @import("server.zig").Event;
-const linux = std.os.linux;
 const posix = std.posix;
 const system = std.posix.system;
 

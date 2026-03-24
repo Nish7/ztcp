@@ -1,19 +1,29 @@
 const std = @import("std");
 const Listener = @import("server.zig").Listener;
+const Config = @import("server.zig").Config;
 const net = std.net;
-const posix = std.posix;
+const Kqueue = @import("kqueue.zig").Kqueue;
+const Epoll = @import("epoll.zig").Epoll;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
     const address: net.Address = try net.Address.parseIp("127.0.0.1", 5882);
-    var listeners: [2]Listener = undefined;
+
+    const Loop = switch (@import("builtin").os.tag) {
+        .macos => Kqueue,
+        .linux => Epoll,
+        else => @panic("platform not supported"),
+    };
+
+    const L = Listener(Loop);
+    var listeners: [2]L = undefined;
     var threads: [2]std.Thread = undefined;
 
     for (&listeners, 0..) |_, id| {
-        listeners[id] = try Listener.init(allocator, 4096);
-        threads[id] = try std.Thread.spawn(.{}, Listener.run, .{ &listeners[id], address });
+        listeners[id] = try L.init(allocator, .{}, id);
+        threads[id] = try std.Thread.spawn(.{}, L.run, .{ &listeners[id], address });
     }
 
     // TODO: shared global state to shutdown specific listener

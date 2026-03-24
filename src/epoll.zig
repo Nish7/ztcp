@@ -36,7 +36,7 @@ pub const Epoll = struct {
                 else => |nptr| {
                     const client: *Client = @ptrFromInt(nptr);
                     if (client.closed) return .{ .closed = {} };
-                    if (ready.flags & posix.system.EV.ERROR != 0) return .{ .err = {} };
+                    if (ready.events & linux.EPOLL.ERR == linux.EPOLL.ERR) return .{ .err = {} };
                     if (ready.events & linux.EPOLL.IN == linux.EPOLL.IN) return .{ .read = client };
                     return .{ .write = client };
                 },
