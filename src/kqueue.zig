@@ -37,9 +37,9 @@ pub const Kqueue = struct {
 
         pub fn next(self: *Iterator) ?Event {
             if (self.index == self.ready_list.len) return null;
+            const ready = self.ready_list[self.index];
 
             self.index += 1;
-            const ready = self.ready_list[self.index];
 
             switch (ready.udata) {
                 0 => return .{ .accept = {} },

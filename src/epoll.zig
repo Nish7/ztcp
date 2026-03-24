@@ -28,9 +28,8 @@ pub const Epoll = struct {
 
         fn next(self: *Iterator) ?Event {
             if (self.index == self.ready_list.len) return null;
-
-            self.index += 1;
             const ready = self.ready_list[self.index];
+            self.index += 1;
 
             switch (ready.data.ptr) {
                 0 => return .{ .accept = {} },

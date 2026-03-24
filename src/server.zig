@@ -11,12 +11,12 @@ const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.tcp_demo);
 
-const READ_TIMEOUT = 60_000;
+const READ_TIMEOUT = 60_000; // TODO: move this into global config struct
 pub const ClientList = std.DoublyLinkedList;
 
 pub const Event = union(enum) { accept: void, read: *Client, write: *Client, err: void, closed: void };
 
-const Loop = switch (@import("builtin").os.tag) {
+pub const Loop = switch (@import("builtin").os.tag) {
     .macos => Kqueue,
     .linux => Epoll,
     else => @panic("platform not supported"),
@@ -85,10 +85,10 @@ pub const Listener = struct {
                     .accept => self.accept(listener) catch |err| log.err("failed to accept: {}", .{err}),
                     .read => |client| {
                         const msg = client.readMessage() catch |err| {
-                            std.debug.print("read error: {any}", .{err});
+                            std.debug.print("read error: {any}\n", .{err});
                             self.removeClient(client);
-                            break;
-                        } orelse break;
+                            continue;
+                        } orelse continue;
 
                         std.debug.print("got: {s}\n", .{msg});
 
@@ -99,10 +99,10 @@ pub const Listener = struct {
                         client.writeMessage(msg) catch |err| {
                             std.debug.print("write error: {any}", .{err});
                             self.removeClient(client);
-                            break;
+                            continue;
                         };
 
-                        if (client.to_write.len > 0) break;
+                        if (client.to_write.len > 0) continue;
                     },
                     .write => |client| {
                         client.write() catch self.removeClient(client);
@@ -169,6 +169,9 @@ pub const Listener = struct {
             errdefer self.read_timeout_list.remove(&(client.read_timeout_node.node));
 
             try self.poll.newClient(client);
+
+            std.debug.print("New Client Connected: {f}\n", .{client.address});
+
             self.connected += 1;
         }
     }
