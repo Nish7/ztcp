@@ -1,5 +1,6 @@
 const std = @import("std");
 const Client = @import("client.zig").Client;
+const Event = @import("server.zig").Event;
 const linux = std.os.linux;
 const posix = std.posix;
 const system = std.posix.system;
@@ -19,7 +20,7 @@ pub const Kqueue = struct {
         posix.close(self.kfd);
     }
 
-    pub fn wait(self: *Kqueue, timeout_ms: i32) ![]system.Kevent {
+    pub fn wait(self: *Kqueue, timeout_ms: i32) !Iterator {
         const timeout = posix.timespec{
             .sec = @intCast(@divTrunc(timeout_ms, 1000)),
             .nsec = @intCast(@mod(timeout_ms, 1000) * 1000000),
@@ -27,8 +28,33 @@ pub const Kqueue = struct {
 
         const count = try posix.kevent(self.kfd, self.change_list[0..self.change_count], &self.event_list, &timeout);
         self.change_count = 0;
-        return self.event_list[0..count];
+        return .{ .index = 0, .ready_list = self.event_list[0..count] };
     }
+
+    const Iterator = struct {
+        index: usize,
+        ready_list: []system.Kevent,
+
+        pub fn next(self: *Iterator) ?Event {
+            if (self.index == self.ready_list.len) return null;
+            const ready = self.ready_list[self.index];
+
+            self.index += 1;
+
+            switch (ready.udata) {
+                0 => return .{ .accept = {} },
+                else => |nptr| {
+                    const client: *Client = @ptrFromInt(nptr);
+                    if (client.closed) return .{ .closed = {} };
+                    if (ready.flags & posix.system.EV.ERROR != 0) return .{ .err = {} };
+                    if (ready.filter == system.EVFILT.READ) return .{ .read = client };
+                    if (ready.filter == system.EVFILT.WRITE) return .{ .write = client };
+                },
+            }
+
+            return null;
+        }
+    };
 
     pub fn addListener(self: *Kqueue, listener: posix.socket_t) !void {
         // ok to use EV.ADD to renable the listener if it was previous

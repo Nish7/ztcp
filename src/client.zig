@@ -3,8 +3,7 @@ const Reader = @import("reader.zig").Reader;
 const net = std.net;
 const posix = std.posix;
 const ClientList = @import("server.zig").ClientList;
-const Epoll = @import("epoll.zig").Epoll;
-const Kqueue = @import("kqueue.zig").Kqueue;
+const Loop = @import("server.zig").Loop;
 
 pub const Client = struct {
     reader: Reader,
@@ -12,7 +11,7 @@ pub const Client = struct {
     address: net.Address,
     read_timeout_node: *ClientNode,
     read_timeout: i64,
-    poll: *Kqueue,
+    poll: *Loop,
     closed: bool = false,
 
     allocator: std.mem.Allocator,
@@ -24,7 +23,7 @@ pub const Client = struct {
         node: ClientList.Node = .{},
     };
 
-    pub fn init(allocator: std.mem.Allocator, socket: posix.socket_t, address: std.net.Address, poll: *Kqueue) !Client {
+    pub fn init(allocator: std.mem.Allocator, socket: posix.socket_t, address: std.net.Address, poll: *Loop) !Client {
         var reader = try Reader.init(allocator, 4096);
         errdefer reader.deinit(allocator);
 

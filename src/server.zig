@@ -11,10 +11,18 @@ const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.tcp_demo);
 
-const READ_TIMEOUT = 60_000;
+const READ_TIMEOUT = 60_000; // TODO: move this into global config struct
 pub const ClientList = std.DoublyLinkedList;
 
-pub const Server = struct {
+pub const Event = union(enum) { accept: void, read: *Client, write: *Client, err: void, closed: void };
+
+pub const Loop = switch (@import("builtin").os.tag) {
+    .macos => Kqueue,
+    .linux => Epoll,
+    else => @panic("platform not supported"),
+};
+
+pub const Listener = struct {
     allocator: Allocator,
     connected: usize,
     max: usize,
@@ -23,10 +31,10 @@ pub const Server = struct {
     client_node_pool: std.heap.MemoryPool(ClientNode),
     pending_free_list: []*Client,
     pending_count: usize = 0,
-    poll: Kqueue,
+    poll: Loop,
 
-    pub fn init(allocator: Allocator, max: usize) !Server {
-        const poll = try Kqueue.init();
+    pub fn init(allocator: Allocator, max: usize) !Listener {
+        const poll = try Loop.init();
         const client_free_list = try allocator.alloc(*Client, max);
 
         return .{
@@ -41,14 +49,14 @@ pub const Server = struct {
         };
     }
 
-    pub fn deinit(self: *Server) void {
+    pub fn deinit(self: *Listener) void {
         self.poll.deinit();
         self.client_pool.deinit();
         self.client_node_pool.deinit();
         self.allocator.free(self.pending_free_list);
     }
 
-    pub fn run(self: *Server, address: std.net.Address) !void {
+    pub fn run(self: *Listener, address: std.net.Address) !void {
         const tpe: u32 = posix.SOCK.STREAM | posix.SOCK.NONBLOCK;
         const protocol = posix.IPPROTO.TCP;
 
@@ -56,6 +64,13 @@ pub const Server = struct {
         defer posix.close(listener);
 
         try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+
+        if (@hasDecl(posix.SO, "REUSEPORT_LB")) {
+            try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEPORT_LB, &std.mem.toBytes(@as(c_int, 1)));
+        } else if (@hasDecl(posix.SO, "REUSEPORT")) {
+            try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEPORT, &std.mem.toBytes(@as(c_int, 1)));
+        }
+
         try posix.bind(listener, &address.any, address.getOsSockLen());
         try posix.listen(listener, 128);
 
@@ -63,54 +78,36 @@ pub const Server = struct {
 
         while (true) {
             const next_timeout = self.enforceTimeout();
-            const ready_events = try self.poll.wait(next_timeout);
+            var it = try self.poll.wait(next_timeout);
 
-            for (ready_events) |ready| {
-                switch (ready.udata) {
-                    0 => self.accept(listener) catch |err| log.err("failed to accept: {}", .{err}),
-                    else => |nptr| {
-                        std.debug.print("Client Event [{x}]\n", .{nptr});
-                        std.debug.print(
-                            "event filter={} flags=0x{x} udata=0x{x}\n",
-                            .{ ready.filter, ready.flags, ready.udata },
-                        );
-
-                        const events = ready.filter;
-                        const client: *Client = @ptrFromInt(nptr);
-
-                        if (client.closed) continue;
-
-                        if ((ready.flags & posix.system.EV.ERROR) != 0) {
-                            std.debug.print("kqueue error event: filter={} data={} udata=0x{x}\n", .{
-                                ready.filter, ready.data, ready.udata,
-                            });
+            while (it.next()) |ready| {
+                switch (ready) {
+                    .accept => self.accept(listener) catch |err| log.err("failed to accept: {}", .{err}),
+                    .read => |client| {
+                        const msg = client.readMessage() catch |err| {
+                            std.debug.print("read error: {any}\n", .{err});
+                            self.removeClient(client);
                             continue;
-                        } else if (events == system.EVFILT.READ) {
-                            while (true) {
-                                const msg = client.readMessage() catch |err| {
-                                    std.debug.print("read error: {any}", .{err});
-                                    self.removeClient(client);
-                                    break;
-                                } orelse break;
+                        } orelse continue;
 
-                                std.debug.print("got: {s}\n", .{msg});
+                        std.debug.print("got: {s}\n", .{msg});
 
-                                client.read_timeout = std.time.milliTimestamp() + READ_TIMEOUT;
-                                self.read_timeout_list.remove(&(client.read_timeout_node.node));
-                                self.read_timeout_list.append(&(client.read_timeout_node.node));
+                        client.read_timeout = std.time.milliTimestamp() + READ_TIMEOUT;
+                        self.read_timeout_list.remove(&(client.read_timeout_node.node));
+                        self.read_timeout_list.append(&(client.read_timeout_node.node));
 
-                                client.writeMessage(msg) catch |err| {
-                                    std.debug.print("write error: {any}", .{err});
-                                    self.removeClient(client);
-                                    break;
-                                };
+                        client.writeMessage(msg) catch |err| {
+                            std.debug.print("write error: {any}", .{err});
+                            self.removeClient(client);
+                            continue;
+                        };
 
-                                if (client.to_write.len > 0) break;
-                            }
-                        } else if (events == system.EVFILT.WRITE) {
-                            client.write() catch self.removeClient(client);
-                        }
+                        if (client.to_write.len > 0) continue;
                     },
+                    .write => |client| {
+                        client.write() catch self.removeClient(client);
+                    },
+                    .err, .closed => continue,
                 }
             }
 
@@ -118,7 +115,7 @@ pub const Server = struct {
         }
     }
 
-    fn drainPendingClient(self: *Server) void {
+    fn drainPendingClient(self: *Listener) void {
         for (self.pending_free_list[0..self.pending_count]) |c| {
             c.deinit(self.allocator);
             self.client_node_pool.destroy(c.read_timeout_node);
@@ -128,7 +125,7 @@ pub const Server = struct {
         self.pending_count = 0;
     }
 
-    fn accept(self: *Server, listener: posix.socket_t) !void {
+    fn accept(self: *Listener, listener: posix.socket_t) !void {
         const available = self.max - self.connected;
         if (available <= 0) {
             std.debug.print("No space for available for client. Paused Accepting", .{});
@@ -172,11 +169,14 @@ pub const Server = struct {
             errdefer self.read_timeout_list.remove(&(client.read_timeout_node.node));
 
             try self.poll.newClient(client);
+
+            std.debug.print("New Client Connected: {f}\n", .{client.address});
+
             self.connected += 1;
         }
     }
 
-    fn enforceTimeout(self: *Server) i32 {
+    fn enforceTimeout(self: *Listener) i32 {
         const now = std.time.milliTimestamp();
         var node = self.read_timeout_list.first;
 
@@ -191,7 +191,7 @@ pub const Server = struct {
         }
     }
 
-    fn removeClient(self: *Server, client: *Client) void {
+    fn removeClient(self: *Listener, client: *Client) void {
         if (client.closed) return;
 
         posix.close(client.socket);
