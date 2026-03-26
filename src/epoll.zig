@@ -17,8 +17,8 @@ pub const Epoll = struct {
         posix.close(self.efd);
     }
 
-    pub fn wait(self: *Epoll, timeout: i32) Iterator {
-        const count = posix.epoll_wait(self.efd, &self.ready_list, timeout);
+    pub fn wait(self: *Epoll, timeout: ?i32) Iterator {
+        const count = posix.epoll_wait(self.efd, &self.ready_list, timeout orelse -1);
         return .{ .index = 0, .ready_list = self.ready_list[0..count] };
     }
 

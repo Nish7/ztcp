@@ -19,13 +19,13 @@ pub const Kqueue = struct {
         posix.close(self.kfd);
     }
 
-    pub fn wait(self: *Kqueue, timeout_ms: i32) !Iterator {
-        const timeout = posix.timespec{
-            .sec = @intCast(@divTrunc(timeout_ms, 1000)),
-            .nsec = @intCast(@mod(timeout_ms, 1000) * 1000000),
-        };
+    pub fn wait(self: *Kqueue, timeout_ms: ?i32) !Iterator {
+        const timeout = if (timeout_ms) |tm| &posix.timespec{
+            .sec = @intCast(@divTrunc(tm, 1000)),
+            .nsec = @intCast(@mod(tm, 1000) * 1000000),
+        } else null;
 
-        const count = try posix.kevent(self.kfd, self.change_list[0..self.change_count], &self.event_list, &timeout);
+        const count = try posix.kevent(self.kfd, self.change_list[0..self.change_count], &self.event_list, timeout);
         self.change_count = 0;
         return .{ .index = 0, .ready_list = self.event_list[0..count] };
     }

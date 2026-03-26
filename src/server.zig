@@ -148,8 +148,13 @@ pub fn Listener(comptime PollType: type) type {
                     error.WouldBlock => return,
                     else => return err,
                 };
+                errdefer posix.close(socket);
 
-                const client: *Client = try self.client_pool.create();
+                const client: *Client = self.client_pool.create() catch |err| {
+                    log.err("failed to create client: {}", .{err});
+                    continue;
+                };
+
                 errdefer self.client_pool.destroy(client);
 
                 client.* = Client.init(
@@ -158,28 +163,33 @@ pub fn Listener(comptime PollType: type) type {
                     address,
                 ) catch |err| {
                     log.err("failed to initialize client: {}", .{err});
-                    posix.close(socket);
-                    self.client_pool.destroy(client);
-                    return;
+                    continue;
                 };
+                errdefer client.deinit();
 
                 client.read_timeout = std.time.milliTimestamp() + self.config.read_timeout_ms;
-                client.read_timeout_node = try self.client_node_pool.create();
+                client.read_timeout_node = self.client_node_pool.create() catch |err| {
+                    log.err("failed to initialize client node: {}", .{err});
+                    continue;
+                };
                 errdefer self.client_node_pool.destroy(client.read_timeout_node);
 
                 client.read_timeout_node.data = client;
                 self.read_timeout_list.append(&(client.read_timeout_node.node));
                 errdefer self.read_timeout_list.remove(&(client.read_timeout_node.node));
 
-                try self.poll.newClient(client);
+                self.poll.newClient(client) catch |err| {
+                    log.err("failed to create a new client for event {}", .{err});
+                    continue;
+                };
 
                 std.debug.print("New Client Connected: {f}\n", .{client.address});
-
                 self.connected += 1;
             }
         }
 
-        fn enforceTimeout(self: *Self) i32 {
+        fn enforceTimeout(self: *Self) ?i32 {
+            // TODO: Timeout eforcement might be better represented in min-heap struct
             const now = std.time.milliTimestamp();
             var node = self.read_timeout_list.first;
 
@@ -190,7 +200,7 @@ pub fn Listener(comptime PollType: type) type {
                 if (diff > 0) return @intCast(diff);
                 posix.shutdown(client.socket, .recv) catch {};
             } else {
-                return -1;
+                return null;
             }
         }
 

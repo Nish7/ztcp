@@ -41,8 +41,8 @@ pub const Client = struct {
         };
     }
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        self.reader.deinit(allocator);
+    pub fn deinit(self: *Self) void {
+        self.reader.deinit(self.allocator);
         self.allocator.free(self.write_buf);
     }
 
