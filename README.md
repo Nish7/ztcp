@@ -1,8 +1,8 @@
 # zTCP
-
-Build TCP Server from Scratch with:
+Echo Server using Zig:
 - Multithreaded Support with `ThreadPool`
 - Non-Blocking/Evented IO
+- Custom Event Pool Support.
 - `epoll` Support 
 - `kqueue` Support
 
